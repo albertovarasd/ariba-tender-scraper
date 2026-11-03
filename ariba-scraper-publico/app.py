@@ -14,14 +14,8 @@ from datetime import datetime
 import zipfile
 import shutil
 
-# --- Forzar salida en UTF-8 (arregla el crash por emojis) ---
-# Cuando este script corre con la salida redirigida a un archivo de log
-# (como hace ejecutar_diario.bat, o el Programador de Tareas de Windows),
-# Python usa por defecto la codificación antigua de la consola de Windows
-# (cp1252), que NO sabe representar emojis (🔍, ⚠️, ✅, etc.) — y el programa
-# se caía con UnicodeEncodeError apenas intentaba imprimir el primero.
-# En una terminal interactiva normal no pasaba porque PowerShell sí entiende
-# UTF-8. Esto fuerza UTF-8 siempre, sin importar el contexto de ejecución.
+# Fuerza UTF-8 en la salida: redirigida a un log (ejecutar_diario.bat,
+# Programador de Tareas) Windows usa cp1252 y los emojis la rompen.
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -30,19 +24,12 @@ except Exception:
 
 load_dotenv()
 
-# --- Soporte opcional para archivos .rar ---
-# Se importa de forma "perezosa" (try/except) para que el programa NO se caiga
-# si el paquete 'rarfile' no está instalado en el entorno (esta era la causa
-# más probable de que funcionara en un equipo/entorno y en otro no).
+# Soporte opcional para .rar: 'rarfile' puede no estar instalado en el entorno.
 try:
     import rarfile
     RARFILE_AVAILABLE = True
-    # Si existe un unrar.exe embebido junto al script (Windows), se usa ese
-    # en vez de depender de que 'unrar' esté en el PATH del sistema.
-    # OJO: usar SIEMPRE la versión de CONSOLA de UnRAR (sin ventanas), nunca
-    # una versión "GUI" — una versión GUI abre su propia ventana pidiendo
-    # "Extraer" y se queda esperando a que alguien la cierre a mano, lo que
-    # trababa por completo las corridas automáticas/desatendidas.
+    # Usa el UnRAR.exe embebido si está, en vez del PATH. Debe ser la versión de
+    # consola: la GUI abre una ventana y deja colgada la corrida desatendida.
     _bundled_unrar = Path(__file__).parent / "UnRAR.exe"
     if _bundled_unrar.exists():
         rarfile.UNRAR_TOOL = str(_bundled_unrar)
@@ -62,10 +49,8 @@ DOWNLOAD_TEMP = Path(os.getenv("DOWNLOAD_TEMP", "./downloads"))
 DOWNLOAD_TEMP.mkdir(parents=True, exist_ok=True)
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
-# Comprador cuyas licitaciones se monitorean: texto que aparece en el menú de
-# compradores de Ariba. COMPRADOR_PATRON es opcional y permite una expresión
-# regular propia (por ejemplo "Empresa Demo|Demo S\.A\."); si no se define,
-# se busca el nombre tal cual.
+# Nombre del comprador tal como aparece en el menú de Ariba. COMPRADOR_PATRON
+# permite una expresión regular propia (ej. "Empresa Demo|Demo S\.A\.").
 COMPRADOR_NOMBRE = (os.getenv("COMPRADOR_NOMBRE") or "").strip()
 COMPRADOR_PATRON = os.getenv("COMPRADOR_PATRON") or re.escape(COMPRADOR_NOMBRE)
 
@@ -110,8 +95,7 @@ def process_archive(filepath, folder_id, g):
         return
 
     if not extracted_files:
-        # El archivo se descomprimió pero no había nada permitido adentro
-        # (o el archivo venía vacío): subir el original igual, por seguridad.
+        # Nada permitido adentro (o venía vacío): se sube el original igual.
         print(f"⚠️ No se encontraron archivos permitidos dentro de '{filepath.name}'. "
               f"Subiendo el archivo comprimido original como respaldo.")
         g.upload_file(filepath, folder_id)
@@ -154,29 +138,16 @@ async def scrap():
     execution_date = datetime.now().strftime("%d/%m/%y")
 
     async with async_playwright() as p:
-        # OJO: en modo HEADLESS=true (usado en el servidor) el navegador puede
-        # comportarse distinto a HEADLESS=false — se detectó que con el mismo
-        # código, misma hoja y mismos registros faltantes, el modo headless
-        # dejó de capturar licitaciones que sí capturaba en modo visible.
-        # La causa más probable es el tamaño de "ventana" (viewport): la
-        # tabla de scroll virtual de Ariba puede calcular cuántas filas
-        # renderizar según ese tamaño, y el valor por defecto puede diferir
-        # entre ambos modos. Se fuerza aquí un tamaño grande y CONSISTENTE en
-        # ambos casos, para que la tabla se comporte igual sin importar el
-        # modo de ejecución.
+        # Viewport fijo: en headless Ariba renderizaba menos filas de su tabla de
+        # scroll virtual que en modo visible, y se perdían licitaciones.
         browser = await p.chromium.launch(
             headless=HEADLESS,
             args=["--disable-blink-features=AutomationControlled", "--window-size=1920,1080"]
         )
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
 
-        # --- Forzar descarga (en vez de vista previa) para archivos de imagen ---
-        # Algunos adjuntos (ej. .tif) el navegador los intenta MOSTRAR en vez de
-        # descargarlos, si el servidor no indica explícitamente "esto es un
-        # archivo para guardar" (encabezado Content-Disposition: attachment).
-        # Cuando eso pasa, el código nunca recibe el evento de "descarga" que
-        # espera, y el archivo se pierde en silencio. Esto intercepta la
-        # respuesta y agrega ese encabezado si falta, para imágenes.
+        # Algunos adjuntos (ej. .tif) el navegador los muestra en vez de descargarlos
+        # si falta Content-Disposition: attachment, y nunca llega el evento de descarga.
         async def _forzar_descarga_imagenes(route, request):
             try:
                 response = await route.fetch()
@@ -188,8 +159,7 @@ async def scrap():
                 else:
                     await route.fulfill(response=response)
             except Exception:
-                # Si algo falla en la intercepción, dejar pasar la solicitud
-                # normal en vez de romper toda la navegación.
+                # Si falla la intercepción, dejar pasar la solicitud sin romper la navegación.
                 await route.continue_()
 
         await context.route("**/s3.ariba.com/**", _forzar_descarga_imagenes)
@@ -219,7 +189,7 @@ async def scrap():
         print(f"URL actual post-login: {page.url}")
         print(f"Título de página: {await page.title()}")
 
-        # --- NUEVO BLOQUE: detección condicional de cookies y popup ---
+        # Detección condicional de cookies y popup
         print("Verificando si aparece banner de aceptación de cookies...")
         try:
             await page.wait_for_selector(SELECTORS["cookie_accept"], timeout=10000)
@@ -265,11 +235,8 @@ async def scrap():
         await page.wait_for_selector(SELECTORS["list_item"], timeout=180000)
         await asyncio.sleep(5)
 
-        # Este clic dispara una navegación (a veces con varios saltos de OAuth/
-        # redirecciones) que puede tardar más de lo normal si el servidor o la
-        # red están más lentos ese día — un solo timeout aislado aquí no debería
-        # tirar abajo todo el programa. Se reintenta con más margen antes de
-        # rendirse.
+        # El clic encadena redirecciones de OAuth que pueden tardar: se reintenta con
+        # más margen en vez de abortar por un timeout aislado.
         clic_exitoso = False
         for intento_menu in range(1, 4):
             try:
@@ -336,23 +303,16 @@ async def scrap():
                 await asyncio.sleep(3)
 
         if not comprador_seleccionado:
-            # No seguir a ciegas: si no se pudo confirmar que se seleccionó
-            # el comprador configurado, el resto del scraping leería datos del comprador
-            # equivocado (o de una página en blanco) sin que nadie se dé
-            # cuenta. Mejor cortar acá con un error claro.
+            # Sin confirmar el comprador, el resto del scraping leería datos del comprador
+            # equivocado sin avisar: mejor cortar acá.
             raise RuntimeError(
                 f"No se pudo seleccionar '{COMPRADOR_NOMBRE}' en el menú de "
                 "compradores después de 3 intentos. Abortando para no scrapear datos "
                 "del comprador equivocado. Revisa 'table_debug.png' / vuelve a intentar."
             )
 
-        # "networkidle" espera a que la red quede en silencio total — pero
-        # sitios modernos como Ariba a veces tienen tráfico de fondo constante
-        # (analítica, heartbeats, etc.) que nunca "se calla" del todo, lo que
-        # puede hacer que esta espera falle por timeout aunque la página ya
-        # esté completamente usable. Un timeout aislado acá no debería tirar
-        # abajo todo el programa — se intenta, y si no se logra en 30s, se
-        # sigue igual (los pasos siguientes ya tienen sus propias esperas).
+        # networkidle puede no cumplirse nunca por el tráfico de fondo de Ariba; si no
+        # se logra en 30 s se sigue, los pasos siguientes tienen sus propias esperas.
         try:
             await page.wait_for_load_state("networkidle", timeout=30000)
         except Exception as e:
@@ -400,16 +360,9 @@ async def scrap():
         await page.screenshot(path="table_debug.png", full_page=True)
         print("📸 Captura de pantalla guardada en 'table_debug.png'")
 
-        # --- Expandir SOLO el grupo de licitaciones abiertas ---
-        # Ariba agrupa los eventos por estado y los muestra COLAPSADOS por defecto.
-        # El ícono real de expandir/colapsar es <span class="w-togglebox-icon-off">
-        # (cerrado) / <span class="w-togglebox-icon-on"> (abierto) — hacer clic en la
-        # celda no lo activaba, hay que apuntarle directo a ese ícono.
-        #
-        # BILINGÜE: la interfaz de Ariba puede estar en español ("Estado: Abierto")
-        # o en inglés ("Status: Abierto" / "Status: Open"), según la configuración
-        # de idioma de la cuenta o del navegador. Se prueban todas las variantes
-        # para que funcione sin importar el idioma.
+        # --- Expandir solo el grupo de licitaciones abiertas ---
+        # Ariba los muestra colapsados. El clic va en el <span class="w-togglebox-icon-off">,
+        # no en la celda. La interfaz puede estar en español o inglés: se prueban ambas.
         total_abiertas_esperadas = None
         _VARIANTES_ABIERTO = [
             "Estado: Abierto",   # español completo
@@ -428,9 +381,7 @@ async def scrap():
                     break
 
             if fila_abierto is not None:
-                # Capturar el número entre paréntesis (ej: "Estado: Abierto (109)")
-                # ANTES de expandir, para poder comparar al final cuántas se
-                # procesaron realmente vs. cuántas dice Ariba que hay en total.
+                # El total que muestra Ariba ("Estado: Abierto (109)"), para comparar al final.
                 texto_fila_abierto = await fila_abierto.text_content()
                 match_total = re.search(r"(?:Estado|Status):\s*(?:Abierto|Open)\D*(\d+)",
                                         texto_fila_abierto or "", re.IGNORECASE)
@@ -481,24 +432,16 @@ async def scrap():
         descartadas_duplicado = 0
         filas_no_cargaron = 0
 
-        # --- Varias PASADAS completas de scroll (arriba→abajo) ---
-        # Con muchas filas cambiando a la vez, Ariba a veces tarda más de lo
-        # que un solo reintento por fila puede cubrir. En vez de obligar al
-        # usuario a correr el script de nuevo manualmente, se repite el
-        # recorrido completo (bajando desde arriba) hasta MAX_PASADAS veces,
-        # deteniéndose antes si dos pasadas seguidas no suman nada nuevo.
-        # Con el corte inteligente de más abajo (para en cuanto se alcanza el
-        # total esperado de "Estado: Abierto"), este techo casi nunca se
-        # alcanza en la práctica — la mayoría de las corridas terminan en la
-        # pasada 1 o 2. Solo actúa como red de seguridad cuando de verdad
-        # faltan licitaciones por capturar.
+        # --- Varias pasadas completas de scroll ---
+        # Con muchas filas cambiando a la vez, un reintento por fila no alcanza. Se
+        # repite el recorrido hasta MAX_PASADAS, cortando si dos pasadas seguidas no
+        # suman nada o si ya se alcanzó el total esperado.
         MAX_PASADAS = 5
         for numero_pasada in range(1, MAX_PASADAS + 1):
             print(f"\n🔁 Pasada de scroll #{numero_pasada} de {MAX_PASADAS}...")
             nuevos_antes_de_pasada = len(entries)
 
-            # Volver al inicio del contenedor antes de cada pasada (menos en
-            # la primera, que ya arranca arriba de por sí).
+            # Volver al inicio antes de cada pasada (la primera ya arranca arriba).
             if numero_pasada > 1:
                 await frame.evaluate("""
                     (containerSelector) => {
@@ -509,13 +452,8 @@ async def scrap():
                 await asyncio.sleep(3)
 
             while True:
-                # Volvemos a incluir 'tr:has(a)' porque la tabla de licitaciones reales
-                # no siempre usa las clases tableRow1/tableRow2 (Ariba reutiliza esos
-                # nombres en varios widgets). En vez de filtrar por clase CSS, ahora
-                # filtramos por CONTENIDO: descartamos filas cuyo link es "fantasma"
-                # (apunta a la misma página, típico de acordeones/menús) y filas cuyo
-                # texto no tiene forma de dato real (muy largo, con saltos de línea,
-                # que es lo típico del HTML/JS de widgets de interfaz).
+                # La tabla real no siempre usa tableRow1/tableRow2 (Ariba reutiliza esas clases),
+                # así que se filtra por contenido: links fantasma y textos de widget fuera.
                 rows = await frame.locator("tr.tableRow1, tr.tableRow2, tr[class*='tableRow'], tr:has(a)").all()
 
                 current_frame_url = frame.url
@@ -529,13 +467,8 @@ async def scrap():
                         if not link:
                             continue
 
-                        # Descartar links "fantasma": los que apuntan a la MISMA
-                        # página/ruta base que el frame actual (esto pasa con los
-                        # <a href="#"> de los acordeones y filtros). Comparamos solo
-                        # dominio + ruta (ignorando parámetros de sesión como
-                        # 'awssk=...' que cambian en cada carga, y el fragmento #),
-                        # porque comparar el string completo car-a-car casi nunca
-                        # calza exacto aunque sea la misma página en la práctica.
+                        # Links fantasma: los <a href="#"> de acordeones y filtros. Se compara solo
+                        # dominio + ruta, ignorando parámetros de sesión (awssk=...) que cambian siempre.
                         _link_sin_query = urlparse(link)
                         _frame_sin_query = urlparse(current_frame_url)
                         if (_link_sin_query.netloc == _frame_sin_query.netloc
@@ -543,30 +476,16 @@ async def scrap():
                             descartadas_link_fantasma += 1
                             continue
 
-                        # ⚡ Atajo de velocidad: el link (href) está disponible de
-                        # inmediato, sin esperar a que la fila termine de cargar sus
-                        # celdas de texto. Si este link YA está guardado en el Sheet
-                        # (o ya se vio en esta misma corrida), es una licitación
-                        # conocida — se salta directo, sin gastar los 4 reintentos
-                        # de "¿ya cargó?" que sí hacen falta para filas GENUINAMENTE
-                        # nuevas. Esto es lo que hacía tan lentas las pasadas 2, 3 y 4.
+                        # El href está disponible antes que el texto de la fila: si ya está en el Sheet
+                        # o ya se vio en esta corrida, se salta sin gastar los 4 reintentos de carga.
                         if link in col_urls or link in processed_urls:
                             descartadas_duplicado += 1
                             continue
 
-                        # Extraer celdas td de la fila sin asumir estructuras anidadas rígidas
-                        # OJO: cada celda visual de Ariba trae tablas ANIDADAS adentro
-                        # (un <td> visible que contiene otro <table><td>...). Si se
-                        # buscan todos los "td" del árbol, salen duplicados y los
-                        # índices de columna se corren (por eso "Fecha de Cierre"
-                        # salía vacía). ":scope > td" limita a los <td> hijos
-                        # DIRECTOS de la fila, que son las columnas reales.
-                        #
-                        # REINTENTO REAL: en scroll virtual, una fila puede aparecer en
-                        # el DOM ANTES de que Ariba termine de rellenar sus celdas por
-                        # AJAX. En vez de saltarla y esperar (en vano) que el scroll la
-                        # vuelva a mostrar más tarde, se relee esta MISMA fila hasta 4
-                        # veces con una pequeña espera entre intentos.
+                        # ":scope > td" limita a los <td> hijos directos: cada celda de Ariba trae tablas
+                        # anidadas y recorrer todo el árbol corría los índices ("Fecha de Cierre" salía
+                        # vacía). En scroll virtual la fila puede existir antes de que el AJAX la
+                        # rellene, así que se relee hasta 4 veces.
                         entry_id = ""
                         name_val = ""
                         end_time_val = ""
@@ -576,10 +495,7 @@ async def scrap():
                         for intento in range(4):
                             tds = await row.locator(":scope > td").all()
                             if not tds:
-                                # Sin ni una sola celda <td>: esto NO es una fila de
-                                # datos (probablemente basura de interfaz), nunca va
-                                # a "terminar de cargar" por más que se espere.
-                                # Cortar de inmediato en vez de gastar 4 reintentos.
+                                # Sin ninguna celda <td> no es una fila de datos: no vale la pena reintentar.
                                 break
 
                             cell_texts = []
@@ -589,8 +505,7 @@ async def scrap():
                                     cell_texts.append(txt)
 
                             if not cell_texts:
-                                # Igual que arriba: celdas vacías de entrada no son
-                                # una fila real cargando, son basura de interfaz.
+                                # Igual que arriba: celdas vacías de entrada son basura de interfaz.
                                 break
 
                             name_el = row.locator("a span, a").first
@@ -608,30 +523,20 @@ async def scrap():
                                 fila_completa = True
                                 break
 
-                            # Acá SÍ hay contenido parcial (por ejemplo, ya se ve el
-                            # título pero falta el ID/fecha) — esto es señal real de
-                            # que la fila está cargando, vale la pena esperar y
-                            # reintentar leyendo esta misma fila.
+                            # Contenido parcial: la fila está cargando de verdad, vale la pena reintentar.
                             await asyncio.sleep(0.75)
 
                         if not cell_texts:
                             continue
 
                         if not fila_completa:
-                            # Tras 4 intentos (~3 segundos) la fila sigue sin datos
-                            # completos — recién ahí se descarta de verdad.
-                            # Se muestra también el link (siempre disponible, aunque
-                            # el texto de la fila no haya cargado) para poder
-                            # identificar de qué licitación se trata si hace falta
-                            # revisarla a mano.
+                            # Tras 4 intentos (~3 s) se descarta. Se muestra el link para revisarla a mano.
                             print(f"   ↳ ⏳ fila no terminó de cargar tras varios intentos, se omite: "
                                   f"nombre={name_val[:60]!r} link={link}")
                             continue
 
-                        # Palabras clave que solo aparecen en JS/HTML de widgets de
-                        # interfaz (acordeones, choosers) o en la fila de encabezado
-                        # de la tabla ("Título / ID / Hora de finalización..."),
-                        # nunca en un título o ID real de licitación.
+                        # Palabras que solo aparecen en widgets de interfaz o en el encabezado de la
+                        # tabla, nunca en un título o ID real.
                         _MARCAS_BASURA = ("function(", "ariba.Dom", "RJS(", "ariba.Chooser",
                                            "ariba.AWWidgets", "removeRelocatedCopy",
                                            "Hora de finalización", "No hay artículos")
@@ -649,9 +554,7 @@ async def scrap():
                                 print(f"   ↳ (muestra descarte #{descartadas_forma}) id={entry_id[:80]!r} name={name_val[:80]!r}")
                             continue
 
-                        # Evitar duplicados entre scrolls: por ID (ya guardado en el
-                        # Sheet o ya visto en esta corrida) y por URL (más confiable,
-                        # cubre el caso de una fila re-detectada con otro texto de ID).
+                        # Duplicados entre scrolls: por ID y por URL (cubre una fila redetectada con otro ID).
                         if entry_id in processed_ids or entry_id in col_ids or link in processed_urls:
                             descartadas_duplicado += 1
                             continue
@@ -672,7 +575,6 @@ async def scrap():
                     except Exception as e:
                         print(f"⚠️ Error procesando fila: {e}")
 
-                # Hacer scroll hacia abajo dentro del contenedor
                 scrolled = await frame.evaluate("""
                     (containerSelector) => {
                         const container = document.querySelector(containerSelector);
@@ -693,22 +595,17 @@ async def scrap():
 
                 await asyncio.sleep(5)  # Esperar carga de nuevas filas
 
-            # ¿Cuánto llevamos hasta ahora? (nuevas de esta corrida + ya
-            # conocidas de antes, que también cuentan como "capturadas").
+            # Nuevas de esta corrida + ya conocidas, que también cuentan como capturadas.
             total_procesadas_hasta_ahora = len(entries) + descartadas_duplicado
 
-            # Caso 1: ya tenemos todo lo que Ariba dice que hay — no hace
-            # falta insistir con más pasadas, aunque queden intentos disponibles.
+            # Caso 1: ya está todo lo que Ariba dice que hay.
             if total_abiertas_esperadas is not None and total_procesadas_hasta_ahora >= total_abiertas_esperadas:
                 print(f"   (pasada #{numero_pasada}: ya se cubrieron las {total_abiertas_esperadas} "
                       f"licitaciones esperadas, no hace falta seguir)")
                 break
 
-            # Caso 2: esta pasada no sumó NADA nuevo. Si además ya sabemos que
-            # falta algo, vale la pena intentar una pasada más (el scroll
-            # virtual puede comportarse distinto la segunda vez). Pero si ya
-            # van 2 pasadas seguidas sin sumar nada, insistir más no va a
-            # ayudar — se corta para no perder tiempo de más.
+            # Caso 2: pasada sin nada nuevo. Se permite una más (el scroll virtual puede
+            # comportarse distinto), pero dos seguidas en vano cortan el ciclo.
             if len(entries) == nuevos_antes_de_pasada:
                 print(f"   (pasada #{numero_pasada} no sumó licitaciones nuevas)")
                 if numero_pasada > 1:
@@ -719,10 +616,8 @@ async def scrap():
               f"forma inválida (basura de interfaz): {descartadas_forma}, duplicadas: {descartadas_duplicado}")
 
         # --- Verificación de completitud ---
-        # entries (nuevas) + duplicadas (ya reconocidas como licitaciones reales
-        # ya guardadas) = total de licitaciones REALES que el script pudo
-        # identificar en esta corrida. Esto se compara contra el número que
-        # Ariba mostraba en "Estado: Abierto (XXX)" para saber si faltó algo.
+        # Nuevas + duplicadas = licitaciones reales identificadas, contra el total que
+        # Ariba mostraba en "Estado: Abierto (XXX)".
         total_procesadas = len(entries) + descartadas_duplicado
         if total_abiertas_esperadas is not None:
             faltantes = total_abiertas_esperadas - total_procesadas
@@ -737,7 +632,6 @@ async def scrap():
         else:
             print("⚠️ No se pudo verificar completitud (no se leyó el total esperado de 'Estado: Abierto').")
 
-        # Visitar cada link obtenido en paso anterior
         for entry in entries:
             try:
                 folder_url = ""
@@ -748,9 +642,7 @@ async def scrap():
                 await page.goto(entry["url"], timeout=60000)
                 await asyncio.sleep(10);
                 try:
-                    # BILINGÜE: la etiqueta puede venir en español ("Texto Largo:")
-                    # o en inglés ("Long Text:" / "Long Description:") según el
-                    # idioma configurado en Ariba.
+                    # La etiqueta puede venir en español o inglés según el idioma de Ariba.
                     _ETIQUETAS_TEXTO_LARGO = ["Texto Largo:", "Long Text:", "Long Description:", "Texto largo:"]
                     td_label = None
                     etiqueta_usada = None
@@ -774,15 +666,9 @@ async def scrap():
                 except Exception as e:
                     print(f"Error al buscar el Texto Largo: {e}")
 
-                # --- Respaldo: plantillas alternativas de Ariba (ej. compras
-                # directas tipo "ECO") no usan la etiqueta "Texto Largo:". En su
-                # lugar, la descripción vive en una celda con "colspan" (el ancho
-                # exacto y el estilo varían entre licitaciones, así que en vez de
-                # buscar un valor fijo, se toma la celda con colspan que tenga el
-                # texto MÁS LARGO de la página — la descripción técnica siempre es
-                # bastante más extensa que cualquier otro texto con colspan).
-                # Se busca en TODOS los frames de la página (no solo el principal),
-                # porque Ariba a veces mete este contenido dentro de un iframe.
+                # --- Respaldo: las plantillas tipo "ECO" no usan "Texto Largo:" ---
+                # Ahí la descripción vive en una celda con colspan, de ancho y estilo variables:
+                # se toma la de texto más largo, en todos los frames (puede ir dentro de un iframe).
                 if not entry_description:
                     try:
                         mejor_texto = ""
@@ -806,12 +692,8 @@ async def scrap():
                         print(f"🔍 Respaldo Texto Largo: {candidatos_totales} celda(s) con colspan revisadas en "
                               f"{len(page.frames)} frame(s); mejor candidato ({len(mejor_texto)} caracteres): "
                               f"{mejor_texto[:80]!r}")
-                        # Rechazar texto que claramente NO es una descripción de
-                        # producto, sino navegación/interfaz de Ariba. Esto pasa
-                        # con licitaciones de servicios/proyectos (ej. servicios
-                        # o proyectos), que no tienen ficha de producto
-                        # y antes guardaban "< Volver al panel de instrucciones..."
-                        # como si fuera la descripción.
+                        # Descartar navegación de Ariba: las licitaciones de servicios no tienen ficha de
+                        # producto y guardaban "< Volver al panel de instrucciones..." como descripción.
                         _BASURA_NAVEGACION = (
                             # Español
                             "Volver al panel",
@@ -860,7 +742,6 @@ async def scrap():
                     await element.click()
                     await page.wait_for_selector(SELECTORS["link_popup"], timeout=30000)
                     popup = page.locator(SELECTORS["link_popup"])
-                    # buscar items dentro del popup
                     menu_items = popup.locator("a[role=menuitem]")
                     await asyncio.sleep(1)
                     count = await menu_items.count()
@@ -880,7 +761,6 @@ async def scrap():
                                         continue
                                     filename = raw_text.strip()
 
-                                    # Usar filtro antes de descargar
                                     if should_ignore(filename):
                                         print(f"⏩ Archivo ignorado por filtro: {filename}")
                                         continue
@@ -890,12 +770,8 @@ async def scrap():
 
                                     file_name = download.suggested_filename or f"{entry['id']}_{i}.dat"
 
-                                    # Segunda verificación: el texto del menú (arriba)
-                                    # a veces NO coincide con el nombre real del archivo
-                                    # ya descargado (ej. el menú dice algo genérico pero
-                                    # el archivo real se llama "INFORMACIÓN IMPORTANTE AL
-                                    # PROVEEDOR.pdf"). Se revisa también el nombre real
-                                    # antes de gastar tiempo subiéndolo a Drive.
+                                    # El texto del menú no siempre coincide con el nombre real del archivo ya
+                                    # descargado, así que se filtra también por ese nombre antes de subirlo.
                                     if should_ignore(file_name):
                                         print(f"⏩ Archivo ignorado por filtro (por nombre real tras descargar): {file_name}")
                                         continue
@@ -905,11 +781,9 @@ async def scrap():
                                     await download.save_as(str(saved_path))
                                     print(f"Archivo descargado: {saved_path}")
                                     archivos_descargados_nombres.append(file_name)
-                                    # Subir a Drive
                                     folder_id, folder_link = g.ensure_folder(entry["id"])
                                     folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
 
-                                    # Si es zip o rar, descomprimir y subir solo permitidos
                                     if saved_path.suffix.lower() in {'.zip', '.rar'}:
                                         process_archive(saved_path, folder_id, g)
                                     else:
@@ -924,25 +798,18 @@ async def scrap():
                     else:
                         print(f"Se esperaban al menos 2 elementos en popup, encontrados {count}")
                   except Exception as e:
-                    # Un hipo de red o un popup que no abre en ESTE adjunto ya no
-                    # tira abajo todo el programa: se salta este link y se sigue
-                    # con el resto de la licitación.
+                    # Un fallo en este adjunto no debe cortar el resto de la licitación.
                     print(f"⚠️ Error procesando un link de descarga (se continúa con el siguiente): {e}")
 
-                # --- Verificación: si el "Texto largo" menciona un número de
-                # plano, ¿alguno de los archivos descargados coincide? ---
-                # Heurística simple por palabras clave (sin IA): busca
-                # "NUMERO PLANO:", "PLANO:", "N° PLANO:" seguido del código,
-                # y avisa si NINGÚN archivo descargado contiene ese código en
-                # su nombre — típico en productos mecánicos/estructurales,
-                # donde el plano suele ser el archivo clave más importante.
+                # --- ¿Falta el plano? ---
+                # Busca "NUMERO PLANO:" / "PLANO:" / "N° PLANO:" en el texto largo y avisa si
+                # ningún archivo descargado trae ese código en el nombre.
                 match_plano = re.search(
                     r'(?:N[ÚU]MERO\s+PLANO|N[°º]?\s*PLANO|PLANO)\s*:?\s*([A-Za-z0-9][A-Za-z0-9\-_./]{2,40})',
                     entry_description, re.IGNORECASE
                 )
                 if match_plano:
                     codigo_plano = match_plano.group(1).strip().rstrip('.,;')
-                    # Normalizar para comparar sin importar mayúsculas/guiones
                     codigo_normalizado = re.sub(r'[^A-Za-z0-9]', '', codigo_plano).lower()
                     encontrado = any(
                         codigo_normalizado in re.sub(r'[^A-Za-z0-9]', '', nombre).lower()
@@ -956,14 +823,10 @@ async def scrap():
                 g.insert_rows([[execution_date, "NO", entry["name"], entry["id"], entry["end_time"], entry_description, product_quantity, "Pendiente revisión", entry["url"], folder_url]])
                 nuevas_filas += 1
             except Exception as e:
-                # Si UNA licitación falla por completo (timeout de red,
-                # página caída, etc.) no se pierde el resto del trabajo:
-                # se registra el error y se sigue con la siguiente.
+                # Una licitación caída no debe perder el resto del trabajo.
                 print(f"❌ Error procesando la licitación {entry.get('id','?')} (se continúa con la siguiente): {e}")
 
-                # Si el NAVEGADOR se cayó (no solo esta página), todas las
-                # licitaciones siguientes fallarían en cascada. Se detecta y se
-                # reabre el navegador para poder continuar con el resto.
+                # Si se cayó el navegador entero, las siguientes fallarían en cascada: se reabre.
                 if "browser has been closed" in str(e) or "Target page, context or browser" in str(e):
                     print("🔄 El navegador se cerró inesperadamente. Reabriéndolo para continuar...")
                     try:
@@ -982,8 +845,7 @@ async def scrap():
                         await context.route("**/*.tiff", _forzar_descarga_imagenes)
                         page = await context.new_page()
 
-                        # Volver a iniciar sesión, porque el navegador nuevo no
-                        # conserva la sesión del anterior.
+                        # El navegador nuevo no conserva la sesión.
                         print("🔑 Volviendo a iniciar sesión...")
                         await page.goto(ARIBA_LOGIN_URL, timeout=180000)
                         await page.wait_for_selector(SELECTORS["username"], timeout=120000)
@@ -1000,7 +862,6 @@ async def scrap():
                         print(f"❌ No se pudo reabrir el navegador: {e2}. Se detiene el procesamiento.")
                         break
 
-        # Cerrar navegador
         end_time = time.time()
         elapsed = end_time - start_time
         minutes, seconds = divmod(int(elapsed), 60)
